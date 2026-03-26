@@ -82,6 +82,15 @@ def note_decision(note, venue_id: str) -> Optional[str]:
     return label
 
 
+def supplementary_path(note, pdf_path: Path) -> Optional[Path]:
+    supp_meta = note.content.get("supplementary_material", {})
+    supp_value = supp_meta.get("value") if isinstance(supp_meta, dict) else None
+    if not supp_value:
+        return None
+    ext = Path(supp_value).suffix or ".pdf"
+    return pdf_path.with_name(pdf_path.stem + "_supp" + ext)
+
+
 def paper_path(note, category: str, base_dir: Path) -> Path:
     title = content_value(note, "title")
     fname_parts = []
@@ -134,6 +143,11 @@ def parse_args() -> argparse.Namespace:
         dest="skip_existing",
         action="store_false",
         help="Re-download even if the file already exists.",
+    )
+    parser.add_argument(
+        "--supplementary",
+        action="store_true",
+        help="Also download supplementary material for each paper if available.",
     )
     parser.add_argument(
         "--info",
@@ -289,6 +303,11 @@ def main() -> None:
     print(f"Requested decisions: {', '.join(args.decisions)}")
     print(f"Already present: {already_present}. To download now: {len(to_download)}")
 
+    if args.supplementary:
+        to_download = [(note, cat, path) for note, cat, path in to_download
+                       if supplementary_path(note, path) is not None]
+        print(f"Papers with supplementary material: {len(to_download)}")
+
     for note, category, path in tqdm(to_download, desc="Downloading", unit="paper"):
         pdf_meta = note.content.get("pdf", {})
         pdf_field_value = pdf_meta.get("value") if isinstance(pdf_meta, dict) else None
@@ -312,6 +331,39 @@ def main() -> None:
             continue
 
     print(f"Done. Files saved under {base_dir}/<decision>/")
+
+    if args.supplementary:
+        requested = set(args.decisions)
+        supp_tasks = []
+        supp_existing = 0
+        for note in list(accepted) + list(rejected):
+            label = note_decision(note, args.venue_id)
+            target = target_category(label, requested)
+            if not target:
+                continue
+            supp_p = supplementary_path(note, paper_path(note, target, base_dir))
+            if supp_p is None:
+                continue
+            if args.skip_existing and supp_p.exists():
+                supp_existing += 1
+            else:
+                supp_tasks.append((note, supp_p))
+
+        print(f"Supplementary: {supp_existing} already present. To download now: {len(supp_tasks)}")
+        for note, supp_p in tqdm(supp_tasks, desc="Downloading supplementary", unit="file"):
+            try:
+                supp_bytes = client.get_attachment(field_name="supplementary_material", id=note.id)
+            except Exception as exc:  # noqa: BLE001
+                tqdm.write(f"Failed to fetch supplementary for {note.id}: {exc}")
+                continue
+
+            try:
+                tmp = supp_p.with_suffix(supp_p.suffix + ".part")
+                tmp.parent.mkdir(parents=True, exist_ok=True)
+                tmp.write_bytes(supp_bytes)
+                tmp.replace(supp_p)
+            except Exception as exc:  # noqa: BLE001
+                tqdm.write(f"Failed to save {supp_p}: {exc}")
 
 
 if __name__ == "__main__":

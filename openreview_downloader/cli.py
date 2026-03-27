@@ -2,6 +2,7 @@
 
 import argparse
 import os
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -272,6 +273,29 @@ def print_info(venue_id: str, counts: Dict[str, int]) -> None:
     print(f"Rejected: {counts['rejected']}")
 
 
+def init_downloads_csv(
+    csv_path: Path, venue_id: str, decisions: List[str],
+    supplementary: bool, skip_existing: bool, out_dir: Path,
+) -> None:
+    now = datetime.now()
+    with csv_path.open("a") as f:
+        if csv_path.stat().st_size > 0:
+            f.write("\n")
+        f.write(f"{now.strftime('%Y-%m-%d')}\n")
+        f.write(f"{now.strftime('%H:%M:%S')}\n")
+        f.write(f"{venue_id}\n")
+        f.write(f"{','.join(decisions)}\n")
+        f.write(f"{supplementary}\n")
+        f.write(f"{skip_existing}\n")
+        f.write(f"{out_dir}\n")
+        f.write("\ndownloaded:\n")
+
+
+def append_download_row(csv_path: Path, filename: str, pdf_status: str, supp_status: str) -> None:
+    with csv_path.open("a") as f:
+        f.write(f"{filename},{pdf_status},{supp_status}\n")
+
+
 def main() -> None:
     args = parse_args()
 
@@ -279,6 +303,8 @@ def main() -> None:
     base_dir = args.out_dir or conference_dir(args.venue_id)
     if not args.info:
         base_dir.mkdir(parents=True, exist_ok=True)
+        csv_path = base_dir / "downloads.csv"
+        init_downloads_csv(csv_path, args.venue_id, args.decisions, args.supplementary, args.skip_existing, base_dir)
 
     need_rejected = args.info or "rejected" in args.decisions
     print(f"Fetching accepted submissions for {args.venue_id}...")
@@ -315,10 +341,12 @@ def main() -> None:
             tqdm.write(f"Skipping {note.id}: no pdf field")
             continue
 
+        pdf_status = "failed"
         try:
             pdf_bytes = client.get_attachment(field_name="pdf", id=note.id)
         except Exception as exc:  # noqa: BLE001
             tqdm.write(f"Failed to fetch {note.id}: {exc}")
+            append_download_row(csv_path, path.name, pdf_status, "N/A")
             continue
 
         try:
@@ -326,10 +354,13 @@ def main() -> None:
             tmp_path.parent.mkdir(parents=True, exist_ok=True)
             tmp_path.write_bytes(pdf_bytes)
             tmp_path.replace(path)
+            pdf_status = "ok"
         except Exception as exc:  # noqa: BLE001
             tqdm.write(f"Failed to save {path}: {exc}")
+            append_download_row(csv_path, path.name, pdf_status, "N/A")
             continue
 
+        supp_status = "N/A"
         if args.supplementary:
             supp_p = supplementary_path(note, path)
             if supp_p is not None and not (args.skip_existing and supp_p.exists()):
@@ -338,8 +369,12 @@ def main() -> None:
                     tmp = supp_p.with_suffix(supp_p.suffix + ".part")
                     tmp.write_bytes(supp_bytes)
                     tmp.replace(supp_p)
+                    supp_status = "ok"
                 except Exception as exc:  # noqa: BLE001
                     tqdm.write(f"Failed to fetch/save supplementary for {note.id}: {exc}")
+                    supp_status = "failed"
+
+        append_download_row(csv_path, path.name, pdf_status, supp_status)
 
     print(f"Done. Files saved under {base_dir}/<decision>/")
 
